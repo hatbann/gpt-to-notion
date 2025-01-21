@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "ChatGPT to Notion",
+  "version": "1.0",
+  "description": "ChatGPT 대화를 요약하여 Notion에 업로드",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": [
+    "https://chat.openai.com/*",
+    "https://api.notion.com/*",
+    "https://chatgpt.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": "icon.jpg"
+  }
+}

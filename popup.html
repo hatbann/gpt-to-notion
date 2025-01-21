@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <title>ChatGPT 요약</title>
+    <style>
+      #settings {
+        display: none;
+      }
+      #savedInfo {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>ChatGPT 요약 및 노션 업로드</h1>
+    <div id="settings">
+      <label for="notionApiKey">OPNEAI API Key:</label>
+      <input type="text" id="openaiApiKey" placeholder="OPENAI API 키 입력" />
+      <label for="openaiApiKey">Notion API Key:</label>
+      <input type="text" id="notionApiKey" placeholder="API 키 입력" />
+      <br />
+      <label for="notionDatabaseId">Notion Database ID:</label>
+      <input
+        type="text"
+        id="notionDatabaseId"
+        placeholder="데이터베이스 ID 입력"
+      />
+      <br />
+      <button id="saveKeys">저장</button>
+    </div>
+    <div id="savedInfo">
+      <p><strong>Notion API Key:</strong> <span id="displayApiKey"></span></p>
+      <p><strong>Database ID:</strong> <span id="displayDatabaseId"></span></p>
+    </div>
+    <button id="summarize" style="display: none">요약하기</button>
+    <p id="status"></p>
+    <script src="popup.js"></script>
+  </body>
+</html>
