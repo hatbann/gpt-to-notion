@@ -4,6 +4,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const openAiApiKeyInput = document.getElementById("openaiApiKey");
   const saveButton = document.getElementById("saveKeys");
   const summarizeButton = document.getElementById("summarize");
+  const lastChatUpdateBtn = document.getElementById("lastChatUpdate");
   const statusText = document.getElementById("status");
 
   const settingsDiv = document.getElementById("settings");
@@ -18,7 +19,7 @@ document.addEventListener("DOMContentLoaded", () => {
       displayApiKey.textContent = result.notionApiKey;
       displayDatabaseId.textContent = result.notionDatabaseId;
       savedInfoDiv.style.display = "block"; // 저장된 정보 표시
-      summarizeButton.style.display = "block"; // 요약 버튼 활성화
+      lastChatUpdateBtn.style.display = "block"; // 마지막 내용 업데이트 버튼 활성화
     } else {
       // 키와 ID가 없는 경우
       settingsDiv.style.display = "block"; // 입력 필드와 저장 버튼 표시
@@ -43,6 +44,75 @@ document.addEventListener("DOMContentLoaded", () => {
         location.reload(); // 저장 후 UI 갱신
       }
     );
+  });
+
+  lastChatUpdateBtn.addEventListener("click", async () => {
+    chrome.storage.local.get(["openaiApiKey"], async (keys) => {
+      const openaiApiKey = keys.openaiApiKey;
+
+      if (!openaiApiKey) {
+        statusText.textContent = "OPENAI API Key가 없습니다.";
+        return;
+      }
+
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        const activeTab = tabs[0];
+        if (activeTab && activeTab.url.includes("chatgpt.com")) {
+          // 콘텐츠 스크립트에 메시지 전송
+          chrome.scripting.executeScript(
+            {
+              target: { tabId: activeTab.id },
+              files: ["update.js"],
+            },
+            () => {
+              console.log("로드 스크립트 실행 완료");
+            }
+          );
+        } else {
+          alert("ChatGPT 페이지에서만 작동합니다.");
+        }
+      });
+
+      chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+        if (message.type === "LAST_MESSAGES") {
+          let keywords;
+          let lastIndex;
+
+          async function summarize() {
+            const chatMessages = message.data.messages;
+            lastIndex = message.data.lastIndex;
+            sendResponse({ success: true });
+
+            const keywordText = await summarizeChatMessages(
+              chatMessages,
+              openaiApiKey,
+              "keyword"
+            );
+
+            keywords = keywordText;
+          }
+
+          summarize().then(() => {
+            chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+              chrome.scripting.executeScript({
+                target: { tabId: tabs[0].id },
+                func: saveToBrowserLocalStorage,
+                args: ["lastKeyword", keywords], // key와 value 전달
+              });
+
+              chrome.scripting.executeScript({
+                target: { tabId: tabs[0].id },
+                func: saveToBrowserLocalStorage,
+                args: ["lastProcessedIndex", lastIndex], // key와 value 전달
+              });
+            });
+          });
+        }
+      });
+    });
+
+    summarizeButton.style.display = "block"; // 요약 버튼 활성화
+    lastChatUpdateBtn.style.display = "none";
   });
 
   // 요약 버튼 클릭 시 동작
@@ -88,21 +158,28 @@ document.addEventListener("DOMContentLoaded", () => {
                 const chatMessages = message.data;
                 sendResponse({ success: true });
 
-                const summarizedText = await summarizeChatMessages(
-                  chatMessages,
-                  openaiApiKey
-                );
+                console.log(chatMessages);
 
-                const success = await uploadToNotion(
+                /*             const summarizedText = await summarizeChatMessages(
+                  chatMessages,
+                  openaiApiKey,
+                  "summarize"
+                );
+                 */
+
+                const currentDate = new Date().toISOString();
+
+                /*                 const success = await uploadToNotion(
                   notionApiKey,
                   notionDatabaseId,
                   "ChatGPT 요약",
-                  summarizedText
+                  summarizedText,
+                  currentDate
                 );
 
                 statusText.textContent = success
                   ? "노션 업로드 성공!"
-                  : "노션 업로드 실패!";
+                  : "노션 업로드 실패!"; */
               }
 
               summarize();
@@ -115,14 +192,16 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 // 대화 내용 요약 함수
-async function summarizeChatMessages(messages, apiKey) {
+async function summarizeChatMessages(contents, apiKey, type) {
   const MAX_TOKENS = 4096; // gpt-3.5-turbo 컨텍스트 길이 제한
+  console.log(contents);
   try {
-    const totalTokens = messages.reduce(
-      (sum, message) => sum + calculateTokens(message),
+    const totalTokens = contents.reduce(
+      (sum, content) => sum + calculateTokens(content),
       0
     );
-    console.log(totalTokens);
+    console.log(`messages : ${contents}`);
+    console.log(`token : ${totalTokens}`);
     let summarizeData;
     if (totalTokens > MAX_TOKENS) {
       console.warn("토큰 수 초과. 메시지를 더 줄이세요.");
@@ -134,7 +213,32 @@ async function summarizeChatMessages(messages, apiKey) {
         )
       );
     } else {
-      summarizeData = messages;
+      summarizeData = contents;
+    }
+
+    const messages = [];
+    if (type === "keyword") {
+      messages.push(
+        {
+          role: "system",
+          content:
+            "너는 전문적인 요약 도구이며, 키워드 중심으로 정보를 간결하게 요약합니다.",
+        },
+        {
+          role: "user",
+          content: `다음 대화 내용을 키워드 단위로 요약해 주세요:
+- 주요 주제와 관련 키워드만 나열
+- 각 키워드를 쉼표(,)로 구분
+- 불필요한 설명은 제외
+
+대화 내용:\n${summarizeData}`,
+        }
+      );
+    } else {
+      messages.push(
+        { role: "system", content: "너는 요약 전문가입니다." },
+        { role: "user", content: `요약해 주세요:\n${summarizeData}` }
+      );
     }
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -145,10 +249,7 @@ async function summarizeChatMessages(messages, apiKey) {
       },
       body: JSON.stringify({
         model: "gpt-3.5-turbo",
-        messages: [
-          { role: "system", content: "너는 요약 전문가입니다." },
-          { role: "user", content: `요약해 주세요:\n${summarizeData}` },
-        ],
+        messages: messages,
       }),
     });
 
@@ -167,7 +268,7 @@ async function summarizeChatMessages(messages, apiKey) {
 }
 
 // 노션 업로드 함수
-async function uploadToNotion(apiKey, databaseId, title, content) {
+async function uploadToNotion(apiKey, databaseId, title, content, date) {
   try {
     const response = await fetch("https://api.notion.com/v1/pages", {
       method: "POST",
@@ -179,12 +280,34 @@ async function uploadToNotion(apiKey, databaseId, title, content) {
       body: JSON.stringify({
         parent: { database_id: databaseId },
         properties: {
-          Name: { title: [{ text: { content: title } }] },
+          제목: {
+            title: [
+              {
+                text: { content: title },
+              },
+            ],
+          },
+          날짜: {
+            // 날짜 열 추가
+            date: {
+              start: date, // 시작 날짜 (현재 날짜)
+            },
+          },
         },
         children: [
           {
             object: "block",
-            paragraph: { text: [{ type: "text", text: { content } }] },
+            heading_2: {
+              rich_text: [
+                { type: "text", text: { content: `${date}의 요약` } },
+              ],
+            },
+          },
+          {
+            object: "block",
+            paragraph: {
+              rich_text: [{ type: "text", text: { content } }],
+            },
           },
         ],
       }),
@@ -199,4 +322,9 @@ async function uploadToNotion(apiKey, databaseId, title, content) {
 
 function calculateTokens(text) {
   return text.split(" ").length; // 공백 기준으로 나눔 (단순화)
+}
+
+function saveToBrowserLocalStorage(key, value) {
+  localStorage.setItem(key, value);
+  console.log(`브라우저 localStorage에 저장: ${key} = ${value}`);
 }
