@@ -12,14 +12,45 @@ document.addEventListener("DOMContentLoaded", () => {
   const displayApiKey = document.getElementById("displayApiKey");
   const displayDatabaseId = document.getElementById("displayDatabaseId");
 
-  // 저장된 API Key와 Database ID를 불러오기
   chrome.storage.local.get(["notionApiKey", "notionDatabaseId"], (result) => {
     if (result.notionApiKey && result.notionDatabaseId) {
       // 키와 ID가 저장된 경우
       displayApiKey.textContent = result.notionApiKey;
       displayDatabaseId.textContent = result.notionDatabaseId;
       savedInfoDiv.style.display = "block"; // 저장된 정보 표시
-      lastChatUpdateBtn.style.display = "block"; // 마지막 내용 업데이트 버튼 활성화
+
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        chrome.scripting.executeScript(
+          {
+            target: { tabId: tabs[0].id },
+            func: () => {
+              const lastKeyWord = localStorage.getItem("lastKeyword");
+              const lastProcessedIndex =
+                localStorage.getItem("lastProcessedIndex");
+
+              return {
+                lastKeyWord,
+                lastProcessedIndex,
+              };
+            },
+          },
+          (results) => {
+            if (chrome.runtime.lastError) {
+              console.error("스크립트 실행 오류:", chrome.runtime.lastError);
+              return;
+            }
+
+            const lastKeyword = results[0]?.result.lastKeyWord;
+            const lastProcessedIndex = results[0]?.result.lastProcessedIndex;
+            if (lastKeyword && lastProcessedIndex) {
+              lastChatUpdateBtn.style.display = "none";
+              summarizeButton.style.display = "block";
+            } else {
+              lastChatUpdateBtn.style.display = "block";
+            }
+          }
+        );
+      });
     } else {
       // 키와 ID가 없는 경우
       settingsDiv.style.display = "block"; // 입력 필드와 저장 버튼 표시
@@ -155,31 +186,73 @@ document.addEventListener("DOMContentLoaded", () => {
           (message, sender, sendResponse) => {
             if (message.type === "CHAT_MESSAGES") {
               async function summarize() {
-                const chatMessages = message.data;
+                const chatMessages = message.data.messages;
                 sendResponse({ success: true });
 
-                console.log(chatMessages);
+                if (chatMessages.length !== 0) {
+                  const summarizedText = await summarizeChatMessages(
+                    chatMessages,
+                    openaiApiKey,
+                    "summarize"
+                  );
 
-                /*             const summarizedText = await summarizeChatMessages(
-                  chatMessages,
-                  openaiApiKey,
-                  "summarize"
-                );
-                 */
+                  const parsedContent = JSON.parse(summarizedText);
+                  const summary = parsedContent.summary; // 요약 문장
+                  const keywords = parsedContent.keywords; // 키워드 배열
 
-                const currentDate = new Date().toISOString();
+                  console.log("요약:", summary);
+                  console.log("키워드:", keywords);
+                  const currentDate = new Date().toISOString();
 
-                /*                 const success = await uploadToNotion(
-                  notionApiKey,
-                  notionDatabaseId,
-                  "ChatGPT 요약",
-                  summarizedText,
-                  currentDate
-                );
+                  const success = await uploadToNotion(
+                    notionApiKey,
+                    notionDatabaseId,
+                    "ChatGPT 요약",
+                    summary,
+                    currentDate
+                  );
 
-                statusText.textContent = success
-                  ? "노션 업로드 성공!"
-                  : "노션 업로드 실패!"; */
+                  if (success) {
+                    statusText.textContent = "노션 업로드 성공!";
+                    chrome.tabs.query(
+                      { active: true, currentWindow: true },
+                      (tabs) => {
+                        chrome.scripting.executeScript(
+                          {
+                            target: { tabId: tabs[0].id },
+                            func: () => {
+                              localStorage.setItem(
+                                "lastProcessedIndex",
+                                message.data.lastIndex
+                              );
+                              localStorage.setItem(
+                                "lastKeyword",
+                                JSON.stringify(message.data.keywords)
+                              );
+                            },
+                          },
+                          (results) => {
+                            if (chrome.runtime.lastError) {
+                              console.error(
+                                "스크립트 실행 오류:",
+                                chrome.runtime.lastError
+                              );
+                              return;
+                            } else {
+                              console.log(
+                                "노션 업로드 후 로컬스토리지 업데이트 완료"
+                              );
+                            }
+                          }
+                        );
+                      }
+                    );
+                  } else {
+                    statusText.textContent = "노션 업로드 실패!";
+                  }
+                } else {
+                  statusText.textContent = "요약할 사항이 없습니다.";
+                }
               }
 
               summarize();
@@ -194,14 +267,11 @@ document.addEventListener("DOMContentLoaded", () => {
 // 대화 내용 요약 함수
 async function summarizeChatMessages(contents, apiKey, type) {
   const MAX_TOKENS = 4096; // gpt-3.5-turbo 컨텍스트 길이 제한
-  console.log(contents);
   try {
     const totalTokens = contents.reduce(
       (sum, content) => sum + calculateTokens(content),
       0
     );
-    console.log(`messages : ${contents}`);
-    console.log(`token : ${totalTokens}`);
     let summarizeData;
     if (totalTokens > MAX_TOKENS) {
       console.warn("토큰 수 초과. 메시지를 더 줄이세요.");
@@ -215,7 +285,6 @@ async function summarizeChatMessages(contents, apiKey, type) {
     } else {
       summarizeData = contents;
     }
-
     const messages = [];
     if (type === "keyword") {
       messages.push(
@@ -236,8 +305,31 @@ async function summarizeChatMessages(contents, apiKey, type) {
       );
     } else {
       messages.push(
-        { role: "system", content: "너는 요약 전문가입니다." },
-        { role: "user", content: `요약해 주세요:\n${summarizeData}` }
+        {
+          role: "system",
+          content: "너는 요약 전문가이자 키워드 추출 전문가입니다.",
+        },
+        {
+          role: "user",
+          content: `
+      다음의 두 작업을 수행하세요:
+1. "텍스트" 섹션을 요약합니다.
+2. "키워드텍스트" 섹션에서만 키워드를 추출합니다.
+
+응답 형식은 순수 JSON으로 제공하세요 (Markdown 코드 블록 없이):
+{
+  "summary": "텍스트 요약 내용",
+  "keywords": ["키워드1", "키워드2", "키워드3"]
+}
+
+텍스트:
+${summarizeData}
+
+키워드텍스트:
+${contents[contents.length - 1]}
+
+        `,
+        }
       );
     }
 
@@ -270,50 +362,158 @@ async function summarizeChatMessages(contents, apiKey, type) {
 // 노션 업로드 함수
 async function uploadToNotion(apiKey, databaseId, title, content, date) {
   try {
-    const response = await fetch("https://api.notion.com/v1/pages", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-        "Notion-Version": "2022-06-28",
-      },
-      body: JSON.stringify({
-        parent: { database_id: databaseId },
-        properties: {
-          제목: {
-            title: [
+    const formattedDate = date.split("T")[0];
+    const searchForPage = async (date) => {
+      try {
+        const response = await fetch(
+          `https://api.notion.com/v1/databases/${databaseId}/query`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              "Content-Type": "application/json",
+              "Notion-Version": "2022-06-28",
+            },
+            body: JSON.stringify({
+              filter: {
+                property: "날짜",
+                date: {
+                  equals: date,
+                },
+              },
+            }),
+          }
+        );
+
+        if (!response.ok) {
+          const errorData = await response.json();
+          console.error("Notion API 오류:", errorData);
+          return null;
+        }
+
+        const data = await response.json();
+        return data.results[0]; // 첫 번째 결과 반환 (없으면 null)
+      } catch (error) {
+        console.error("Notion API 요청 중 오류 발생:", error);
+        return null;
+      }
+    };
+
+    const appendToPage = async (pageId, content) => {
+      try {
+        const response = await fetch(
+          `https://api.notion.com/v1/blocks/${pageId}/children`,
+          {
+            method: "PATCH",
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              "Content-Type": "application/json",
+              "Notion-Version": "2022-06-28",
+            },
+            body: JSON.stringify({
+              children: [
+                {
+                  object: "block",
+                  paragraph: {
+                    rich_text: [{ type: "text", text: { content } }],
+                  },
+                },
+              ],
+            }),
+          }
+        );
+
+        if (!response.ok) {
+          const errorData = await response.json();
+          console.error("Notion API 오류:", errorData);
+          return;
+        }
+
+        console.log("기존 페이지에 내용이 추가되었습니다.");
+        return {
+          state: "success",
+        };
+      } catch (error) {
+        console.error("Notion API 요청 중 오류 발생:", error);
+      }
+    };
+
+    const createPage = async (title, content) => {
+      try {
+        const response = await fetch("https://api.notion.com/v1/pages", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+            "Notion-Version": "2022-06-28",
+          },
+          body: JSON.stringify({
+            parent: { database_id: databaseId },
+            properties: {
+              제목: {
+                title: [
+                  {
+                    text: { content: title },
+                  },
+                ],
+              },
+              날짜: {
+                date: {
+                  start: formattedDate,
+                },
+              },
+            },
+            children: [
               {
-                text: { content: title },
+                object: "block",
+                heading_2: {
+                  rich_text: [
+                    { type: "text", text: { content: `${date}의 요약` } },
+                  ],
+                },
+              },
+              {
+                object: "block",
+                paragraph: {
+                  rich_text: [{ type: "text", text: { content } }],
+                },
               },
             ],
-          },
-          날짜: {
-            // 날짜 열 추가
-            date: {
-              start: date, // 시작 날짜 (현재 날짜)
-            },
-          },
-        },
-        children: [
-          {
-            object: "block",
-            heading_2: {
-              rich_text: [
-                { type: "text", text: { content: `${date}의 요약` } },
-              ],
-            },
-          },
-          {
-            object: "block",
-            paragraph: {
-              rich_text: [{ type: "text", text: { content } }],
-            },
-          },
-        ],
-      }),
-    });
+          }),
+        });
 
-    return response.ok;
+        if (!response.ok) {
+          const errorData = await response.json();
+          console.error("Notion API 오류:", errorData);
+          return;
+        }
+
+        const data = await response.json();
+        console.log("페이지 생성 성공:", data);
+        return {
+          state: "success",
+        };
+      } catch (error) {
+        console.error("Notion API 요청 중 오류 발생:", error);
+      }
+    };
+
+    const manageNotionPage = async (title, content) => {
+      const existingPage = await searchForPage(formattedDate);
+
+      if (existingPage) {
+        console.log("기존 페이지 발견:", existingPage.id);
+        const response = await appendToPage(existingPage.id, content);
+        return response.state === "success" ? true : false;
+      } else {
+        console.log("해당 날짜의 페이지가 없으므로 새로 생성합니다.");
+        const response = await createPage(title, content);
+        return response.state === "success" ? true : false;
+      }
+    };
+
+    const success = await manageNotionPage(title, content);
+    return success;
   } catch (error) {
     console.error("노션 업로드 실패:", error);
     return false;
